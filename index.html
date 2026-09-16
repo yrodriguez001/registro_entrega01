@@ -246,7 +246,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
   const [vista, setVista] = useState("entregas"); // "entregas" | "pendientes" | "mantenimiento"
 
   const [form, setForm] = useState({
-    cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media",
+    cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media", chofer: "",
   });
 
   const [fMes, setFMes] = useState(new Date().getMonth() + 1);
@@ -556,6 +556,9 @@ function App({ usuarioEmail, onCerrarSesion }) {
       const faltantes = [];
       if (!form.cliente.trim()) faltantes.push("Cliente");
       if (!form.monto || Number(form.monto) <= 0) faltantes.push("Monto");
+      const entradaEnEdicion = editingId ? (items || []).find((x) => x.id === editingId) : null;
+      const editandoChoferRequerido = entradaEnEdicion && entradaEnEdicion.estadoProceso !== "pendiente";
+      if (editandoChoferRequerido && !form.chofer.trim()) faltantes.push("Chofer");
       if (faltantes.length) {
         setFormError("Falta completar: " + faltantes.join(", "));
         return;
@@ -563,6 +566,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
       const clienteU = up(form.cliente.trim());
       const direccionU = up(form.direccion.trim());
       const facturaU = up(form.factura.trim());
+      const choferEditadoU = up((form.chofer || "").trim());
 
       if (editingId) {
         setItems((prev) => {
@@ -577,6 +581,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
                   estado: form.estado,
                   notas: form.notas.trim(),
                   prioridad: it.estadoProceso === "pendiente" ? form.prioridad : it.prioridad,
+                  chofer: it.estadoProceso !== "pendiente" ? choferEditadoU : it.chofer,
                 }
               : it
           );
@@ -587,12 +592,13 @@ function App({ usuarioEmail, onCerrarSesion }) {
           ...refLists,
           clientes: addOrReactivar(refLists.clientes, clienteU),
           direcciones: addOrReactivar(refLists.direcciones, direccionU),
+          choferes: editandoChoferRequerido ? addOrReactivar(refLists.choferes, choferEditadoU) : refLists.choferes,
         };
-        if (nextRefEdit.clientes !== refLists.clientes || nextRefEdit.direcciones !== refLists.direcciones) {
+        if (nextRefEdit.clientes !== refLists.clientes || nextRefEdit.direcciones !== refLists.direcciones || nextRefEdit.choferes !== refLists.choferes) {
           persistRefLists(nextRefEdit);
         }
         setEditingId(null);
-        setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+        setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media", chofer: "" });
         showToast("Registro actualizado.");
         return;
       }
@@ -632,7 +638,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
       if (nextRef.clientes !== refLists.clientes || nextRef.direcciones !== refLists.direcciones) {
         persistRefLists(nextRef);
       }
-      setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+      setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media", chofer: "" });
       showToast("Entrega registrada como pendiente.");
     } catch (err) {
       setCrashError("Error al agregar: " + (err?.message || String(err)));
@@ -644,6 +650,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
     setForm({
       cliente: it.cliente, direccion: it.direccion, monto: String(it.monto),
       factura: it.factura, estado: it.estado, notas: it.notas || "", prioridad: it.prioridad || "media",
+      chofer: it.chofer || "",
     });
     setFormError("");
     setVista("entregas");
@@ -651,7 +658,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
 
   function cancelEdit() {
     setEditingId(null);
-    setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+    setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media", chofer: "" });
     setFormError("");
   }
 
@@ -1160,6 +1167,12 @@ function App({ usuarioEmail, onCerrarSesion }) {
                   <option value="media">🟡 Media</option>
                   <option value="baja">🟢 Baja</option>
                 </select>
+              </div>
+            )}
+            {editingId && items?.find((x) => x.id === editingId)?.estadoProceso !== "pendiente" && (
+              <div>
+                <label style={labelStyle}>Chofer</label>
+                <SuggestInput value={form.chofer} onChange={(v) => setForm({ ...form, chofer: v })} options={choferesActivos} placeholder="NOMBRE DEL CHOFER" inputStyle={inputStyle} />
               </div>
             )}
             <div style={{ gridColumn: "1 / -1" }}>
