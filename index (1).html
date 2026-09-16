@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Control de Entregas</title>
+
+<!-- React (sin necesidad de instalar nada) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<!-- Para exportar a Excel -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<!-- Firebase: base de datos + inicio de sesión -->
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
+
+<style>
+  body { margin: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // =====================================================================
+  // PEGA AQUÍ TU CONFIGURACIÓN DE FIREBASE
+  //    (la sacas gratis en https://console.firebase.google.com)
+  // =====================================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyArlYj8hlCqEo5GFKDg_NAjWBTwb2l8oEk",
+    authDomain: "registro-entregas01.firebaseapp.com",
+    projectId: "registro-entregas01",
+    storageBucket: "registro-entregas01.firebasestorage.app",
+    messagingSenderId: "715730105728",
+    appId: "1:715730105728:web:91d18a27da40068b2efd65"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const db = firebase.firestore();
+  const auth = firebase.auth();
+
+  // Cada negocio (cuenta) guarda sus datos aparte, bajo su propio UID.
+  function coleccionDatos(uid) {
+    return db.collection("negocios").doc(uid).collection("datos");
+  }
+
+  async function storageGet(key) {
+    const user = auth.currentUser;
+    if (!user) return null;
+    const doc = await coleccionDatos(user.uid).doc(key).get();
+    if (!doc.exists) return null;
+    return { value: doc.data().value };
+  }
+  async function storageSet(key, value) {
+    const user = auth.currentUser;
+    if (!user) throw new Error("No hay sesión activa.");
+    await coleccionDatos(user.uid).doc(key).set({ value });
+    return { value };
+  }
+</script>
+
+<script type="text/plain" id="app-source">
+const { useState, useEffect, useMemo, useRef } = React;
+
+const CHOFER_SUGERIDOS = ["JOVANI ARAUZ", "GREGORIO ROBLES"];
+const STORAGE_KEY = "entregas_lista";
+const REF_KEY = "listas_referencia";
+const CONFIG_KEY = "configuracion_negocio";
+
+const MAINTENANCE_PASSWORD = "54321@";
+const WIPE_PASSWORD = "54321";
+const DEFAULT_REPORTS_PASSWORD = "12345";
+
+function genId() {
+  return Date.now() + "_" + Math.random().toString(36).slice(2, 9);
+}
+
+function nowParts() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    fecha: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    hora: d.toLocaleTimeString("es-PA", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    ts: d.getTime(),
+  };
+}
+
+// El "día de ventas" se reinicia a medianoche (12:00 AM), como un día calendario normal.
+function diaVentaDe(ts) {
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function money(n) {
+  return "B/. " + (Number(n) || 0).toLocaleString("es-PA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function up(s) {
+  return (s || "").toUpperCase();
+}
+
+function migrateList(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map((x) => (typeof x === "string" ? { id: genId(), nombre: x, activo: true } : x));
+}
+
+function addOrReactivar(list, nombre) {
+  const v = up(nombre).trim();
+  if (!v) return list;
+  const existente = list.find((x) => up(x.nombre) === v);
+  if (!existente) return [...list, { id: genId(), nombre: v, activo: true }];
+  if (existente.activo === false) return list.map((x) => (x.id === existente.id ? { ...x, activo: true } : x));
+  return list;
+}
+
+function nombresActivos(list) {
+  return (list || []).filter((x) => x.activo !== false).map((x) => x.nombre);
+}
+
+function mergeCatList(remoto, local) {
+  const remotoList = migrateList(remoto);
+  const mapa = new Map(remotoList.map((x) => [x.id, x]));
+  (local || []).forEach((x) => { if (!mapa.has(x.id)) mapa.set(x.id, x); });
+  return Array.from(mapa.values());
+}
+
+function migrateEntry(it) {
+  const estadoProceso = it.estadoProceso || (it.finalizado ? "finalizada" : (it.chofer ? "en_ejecucion" : "pendiente"));
+  const tsProcesada = it.tsProcesada != null ? it.tsProcesada : (estadoProceso !== "pendiente" ? it.ts : null);
+  const horaProcesada = it.horaProcesada || (estadoProceso !== "pendiente" ? it.hora : "");
+  const fechaProcesada = it.fechaProcesada || (estadoProceso !== "pendiente" ? it.fecha : "");
+  let tsFinalizada = it.tsFinalizada != null ? it.tsFinalizada : null;
+  if (!tsFinalizada && estadoProceso === "finalizada") {
+    tsFinalizada = it.ts || Date.now();
+  }
+  return {
+    ...it,
+    estadoProceso,
+    prioridad: it.prioridad || "media",
+    notas: it.notas || "",
+    tsProcesada,
+    horaProcesada,
+    fechaProcesada,
+    tsFinalizada,
+  };
+}
+
+function formatDuracion(ms) {
+  if (ms == null || ms < 0) return "—";
+  const totalMin = Math.round(ms / 60000);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h <= 0) return `${m} min`;
+  return `${h} h ${m} min`;
+}
+
+function demoraDe(it, now) {
+  if (!it.tsProcesada) return null;
+  const fin = it.estadoProceso === "finalizada" ? it.tsFinalizada : now;
+  if (!fin) return null;
+  return fin - it.tsProcesada;
+}
+
+const COLORS = {
+  bg: "#EDEAE2",
+  surface: "#FFFFFF",
+  ink: "#1F2530",
+  inkSoft: "#5B6270",
+  rust: "#C15A2C",
+  teal: "#2E6B62",
+  tealBg: "#E4EEEC",
+  border: "#D8D3C4",
+  paid: "#2E6B62",
+  paidBg: "#E1EFEA",
+  due: "#B23A2E",
+  dueBg: "#F6E4E0",
+  gold: "#B8860B",
+  goldBg: "#FCEFD9",
+};
+
+const PRIORIDADES = {
+  alta: { label: "🔴 Alta", bg: COLORS.dueBg, text: COLORS.due },
+  media: { label: "🟡 Media", bg: COLORS.goldBg, text: COLORS.gold },
+  baja: { label: "🟢 Baja", bg: COLORS.paidBg, text: COLORS.paid },
+};
+
+const ESTADO_PROCESO = {
+  pendiente: { label: "Pendiente", bg: COLORS.goldBg, text: COLORS.gold },
+  en_ejecucion: { label: "En ejecución", bg: COLORS.tealBg, text: COLORS.teal },
+  finalizada: { label: "Finalizada", bg: "#E5E5E5", text: COLORS.inkSoft },
+};
+
+function SuggestInput({ value, onChange, options, placeholder, inputStyle }) {
+  const [open, setOpen] = useState(false);
+  const opts = (options || []).filter((o) => !value || o.toUpperCase().includes(value.toUpperCase())).slice(0, 8);
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        style={{ ...inputStyle, textTransform: "uppercase" }}
+        value={value}
+        onChange={(e) => { onChange(e.target.value.toUpperCase()); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        autoComplete="off"
+      />
+      {open && opts.length > 0 && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 2px)", left: 0, right: 0, zIndex: 30,
+          background: "#FFFFFF", border: `1px solid ${COLORS.border}`, borderRadius: 4,
+          boxShadow: "0 6px 16px rgba(0,0,0,0.12)", maxHeight: 180, overflowY: "auto",
+        }}>
+          {opts.map((opt) => (
+            <div
+              key={opt}
+              onMouseDown={() => { onChange(opt); setOpen(false); }}
+              style={{ padding: "8px 10px", fontSize: 13, color: COLORS.ink, cursor: "pointer", background: "#FFFFFF" }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = COLORS.tealBg)}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "#FFFFFF")}
+            >
+              {opt}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const mono = { fontFamily: "Consolas, 'SF Mono', 'Courier New', monospace" };
+
+function App({ usuarioEmail, onCerrarSesion }) {
+  const [items, setItems] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const [toast, setToast] = useState("");
+  const toastTimer = useRef(null);
+  const [crashError, setCrashError] = useState("");
+  const [tick, setTick] = useState(0);
+
+  const [vista, setVista] = useState("entregas"); // "entregas" | "pendientes" | "mantenimiento"
+
+  const [form, setForm] = useState({
+    cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media",
+  });
+
+  const [fMes, setFMes] = useState(new Date().getMonth() + 1);
+  const [fAnio, setFAnio] = useState(new Date().getFullYear());
+  const [modoFiltro, setModoFiltro] = useState("mes"); // "mes" | "dia"
+  const [fDia, setFDia] = useState(diaVentaDe(Date.now()));
+  const [formError, setFormError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [refLists, setRefLists] = useState({ clientes: [], direcciones: [], choferes: migrateList(CHOFER_SUGERIDOS) });
+  const [editingId, setEditingId] = useState(null);
+  const [reportsVisible, setReportsVisible] = useState(false);
+  const [showPwPrompt, setShowPwPrompt] = useState(false);
+  const [pwInput, setPwInput] = useState("");
+  const [pwError, setPwError] = useState("");
+  const [showWipePwPrompt, setShowWipePwPrompt] = useState(false);
+  const [wipePwInput, setWipePwInput] = useState("");
+  const [wipePwError, setWipePwError] = useState("");
+  const [confirmModal, setConfirmModal] = useState(null); // {message, onYes}
+  const [promptModal, setPromptModal] = useState(null); // {message, value, onYes}
+  const [busqueda, setBusqueda] = useState("");
+  const [paginaActual, setPaginaActual] = useState(1);
+  const FILAS_POR_PAGINA = 50;
+
+  const [configNegocio, setConfigNegocio] = useState({ nombre: "Chagres Home Center", direccion: "", reportsPassword: DEFAULT_REPORTS_PASSWORD });
+  const [mantenimientoAuth, setMantenimientoAuth] = useState(false);
+  const [showMantPwPrompt, setShowMantPwPrompt] = useState(false);
+  const [mantPwInput, setMantPwInput] = useState("");
+  const [mantPwError, setMantPwError] = useState("");
+  const [mantSeccion, setMantSeccion] = useState("negocio");
+  const [nombreNegocioInput, setNombreNegocioInput] = useState("");
+  const [direccionNegocioInput, setDireccionNegocioInput] = useState("");
+  const [negocioMsg, setNegocioMsg] = useState("");
+  const [nuevoPwReporte, setNuevoPwReporte] = useState("");
+  const [nuevoPwReporteConfirm, setNuevoPwReporteConfirm] = useState("");
+  const [pwSeguridadMsg, setPwSeguridadMsg] = useState("");
+  const [nuevoItemCat, setNuevoItemCat] = useState({ choferes: "", clientes: "", direcciones: "" });
+  const [buscarMant, setBuscarMant] = useState("");
+
+  const [procesarModal, setProcesarModal] = useState(null); // {id, chofer}
+  const [procesarError, setProcesarError] = useState("");
+
+  useEffect(() => {
+    function onWinError(ev) {
+      setCrashError((ev?.error?.message) || ev?.message || "Error desconocido en la página.");
+    }
+    window.addEventListener("error", onWinError);
+    window.addEventListener("unhandledrejection", (ev) => {
+      setCrashError("Promesa fallida: " + (ev?.reason?.message || String(ev?.reason)));
+    });
+    return () => window.removeEventListener("error", onWinError);
+  }, []);
+
+  const [refrescando, setRefrescando] = useState(false);
+
+  async function cargarDatos() {
+    try {
+      const res = await storageGet(STORAGE_KEY);
+      const raw = res ? JSON.parse(res.value) : [];
+      setItems(raw.map(migrateEntry));
+    } catch (err) {
+      setItems((prev) => prev || []);
+    }
+    try {
+      const res2 = await storageGet(REF_KEY);
+      if (res2) {
+        const parsed = JSON.parse(res2.value);
+        setRefLists((prev) => ({
+          clientes: mergeCatList(parsed.clientes, prev.clientes),
+          direcciones: mergeCatList(parsed.direcciones, prev.direcciones),
+          choferes: mergeCatList(parsed.choferes && parsed.choferes.length ? parsed.choferes : CHOFER_SUGERIDOS, prev.choferes),
+        }));
+      }
+    } catch (err) {
+      // se queda con los valores actuales
+    }
+    try {
+      const res3 = await storageGet(CONFIG_KEY);
+      if (res3) {
+        const parsed = JSON.parse(res3.value);
+        setConfigNegocio((prev) => ({ ...prev, ...parsed }));
+      }
+    } catch (err) {
+      // se queda con los valores por defecto
+    }
+  }
+
+  async function refrescarManual() {
+    setRefrescando(true);
+    await cargarDatos();
+    setRefrescando(false);
+    showToast("Datos actualizados.");
+  }
+
+  useEffect(() => {
+    (async () => {
+      await cargarDatos();
+      setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    const intervalo = setInterval(() => {
+      cargarDatos();
+    }, 30000);
+    return () => clearInterval(intervalo);
+  }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setTick((x) => x + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (mantenimientoAuth) {
+      setNombreNegocioInput(configNegocio.nombre || "");
+      setDireccionNegocioInput(configNegocio.direccion || "");
+    }
+  }, [mantenimientoAuth, configNegocio.nombre, configNegocio.direccion]);
+
+  useEffect(() => {
+    if (vista !== "mantenimiento") {
+      setMantenimientoAuth(false);
+    }
+  }, [vista]);
+
+  function showToast(msg) {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2200);
+  }
+
+  function persist(next) {
+    setItems(next);
+    (async () => {
+      try {
+        await storageSet(STORAGE_KEY, JSON.stringify(next));
+        setSaveError("");
+      } catch (err) {
+        setSaveError("No se pudo guardar en la nube (quedó solo en esta pantalla). " + (err?.message || ""));
+      }
+    })();
+  }
+
+  async function persistRefLists(next) {
+    setRefLists(next);
+    try {
+      await storageSet(REF_KEY, JSON.stringify(next));
+    } catch (err) {
+      setSaveError("No se pudo guardar el cliente/dirección/chofer en la nube: " + (err?.message || String(err)));
+    }
+  }
+
+  async function persistConfig(next) {
+    setConfigNegocio(next);
+    try {
+      await storageSet(CONFIG_KEY, JSON.stringify(next));
+    } catch (err) {
+      // no bloquea el uso local
+    }
+  }
+
+  function handleToggleReports() {
+    if (reportsVisible) {
+      setReportsVisible(false);
+    } else {
+      setPwInput("");
+      setPwError("");
+      setShowPwPrompt(true);
+    }
+  }
+
+  function confirmPassword() {
+    const esperado = configNegocio.reportsPassword || DEFAULT_REPORTS_PASSWORD;
+    if (pwInput === esperado) {
+      setReportsVisible(true);
+      setShowPwPrompt(false);
+      setPwInput("");
+      setPwError("");
+    } else {
+      setPwError("Contraseña incorrecta.");
+    }
+  }
+
+  function abrirBorrarTodo() {
+    setWipePwInput("");
+    setWipePwError("");
+    setShowWipePwPrompt(true);
+  }
+
+  function confirmarWipePassword() {
+    if (wipePwInput !== WIPE_PASSWORD) {
+      setWipePwError("Contraseña incorrecta.");
+      return;
+    }
+    setShowWipePwPrompt(false);
+    setWipePwInput("");
+    setWipePwError("");
+    setConfirmModal({
+      message: "⚠ Esto eliminará PERMANENTEMENTE todos los registros de entregas guardados hasta ahora.\n\nEsta acción NO se puede deshacer.\n\n¿Deseas continuar?",
+      onYes: () => {
+        persist([]);
+        showToast("Todos los registros fueron eliminados.");
+      },
+    });
+  }
+
+  function abrirMantenimiento() {
+    if (mantenimientoAuth) {
+      setVista("mantenimiento");
+      return;
+    }
+    setMantPwInput("");
+    setMantPwError("");
+    setShowMantPwPrompt(true);
+  }
+
+  function confirmarMantPassword() {
+    if (mantPwInput === MAINTENANCE_PASSWORD) {
+      setMantenimientoAuth(true);
+      setShowMantPwPrompt(false);
+      setMantPwInput("");
+      setMantPwError("");
+      setVista("mantenimiento");
+    } else {
+      setMantPwError("Contraseña incorrecta.");
+    }
+  }
+
+  function guardarDatosNegocio() {
+    persistConfig({ ...configNegocio, nombre: nombreNegocioInput.trim() || "Mi Negocio", direccion: direccionNegocioInput.trim() });
+    setNegocioMsg("✓ Datos del negocio guardados.");
+    setTimeout(() => setNegocioMsg(""), 2500);
+  }
+
+  function guardarNuevaPwReporte() {
+    setPwSeguridadMsg("");
+    if (!nuevoPwReporte.trim()) { setPwSeguridadMsg("Escribe la nueva contraseña."); return; }
+    if (nuevoPwReporte !== nuevoPwReporteConfirm) { setPwSeguridadMsg("Las contraseñas no coinciden."); return; }
+    persistConfig({ ...configNegocio, reportsPassword: nuevoPwReporte.trim() });
+    setNuevoPwReporte("");
+    setNuevoPwReporteConfirm("");
+    setPwSeguridadMsg("✓ Contraseña de reportes actualizada.");
+  }
+
+  function catAgregar(cat) {
+    const v = up(nuevoItemCat[cat]).trim();
+    if (!v) return;
+    if (refLists[cat].some((x) => up(x.nombre) === v)) {
+      showToast("Ya existe en la lista.");
+      return;
+    }
+    persistRefLists({ ...refLists, [cat]: [...refLists[cat], { id: genId(), nombre: v, activo: true }] });
+    setNuevoItemCat({ ...nuevoItemCat, [cat]: "" });
+    showToast("Agregado.");
+  }
+
+  function catEditar(cat, id, nombreActual) {
+    setPromptModal({
+      message: "Nuevo nombre:",
+      value: nombreActual,
+      onYes: (nuevo) => {
+        const nuevoU = up(nuevo).trim();
+        if (!nuevoU || nuevoU === nombreActual) return;
+        persistRefLists({ ...refLists, [cat]: refLists[cat].map((x) => (x.id === id ? { ...x, nombre: nuevoU } : x)) });
+        const campo = cat === "choferes" ? "chofer" : cat === "clientes" ? "cliente" : "direccion";
+        const afectadas = (items || []).filter((it) => it[campo] === nombreActual).length;
+        if (afectadas > 0) {
+          const next = (items || []).map((it) => (it[campo] === nombreActual ? { ...it, [campo]: nuevoU } : it));
+          persist(next);
+          showToast(`Actualizado. Se corrigió el nombre en ${afectadas} entrega(s) ya registradas.`);
+        } else {
+          showToast("Actualizado.");
+        }
+      },
+    });
+  }
+
+  function catToggleActivo(cat, id) {
+    persistRefLists({ ...refLists, [cat]: refLists[cat].map((x) => (x.id === id ? { ...x, activo: !x.activo } : x)) });
+  }
+
+  function catUsadoEnHistorial(cat, nombre) {
+    const campo = cat === "choferes" ? "chofer" : cat === "clientes" ? "cliente" : "direccion";
+    return (items || []).some((it) => it[campo] === nombre);
+  }
+
+  function catEliminar(cat, id, nombre) {
+    const usado = catUsadoEnHistorial(cat, nombre);
+    setConfirmModal({
+      message: usado
+        ? `"${nombre}" tiene entregas históricas asociadas, así que no se puede eliminar sin afectar ese historial.\n\n¿Prefieres desactivarlo? Así deja de aparecer como sugerencia para entregas nuevas, pero el historial queda intacto.`
+        : `¿Eliminar "${nombre}" de forma permanente? No tiene entregas asociadas.`,
+      onYes: () => {
+        if (usado) {
+          persistRefLists({ ...refLists, [cat]: refLists[cat].map((x) => (x.id === id ? { ...x, activo: false } : x)) });
+        } else {
+          persistRefLists({ ...refLists, [cat]: refLists[cat].filter((x) => x.id !== id) });
+        }
+      },
+    });
+  }
+
+  function addEntry(ev) {
+    try {
+      if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
+      setFormError("");
+      const faltantes = [];
+      if (!form.cliente.trim()) faltantes.push("Cliente");
+      if (!form.monto || Number(form.monto) <= 0) faltantes.push("Monto");
+      if (faltantes.length) {
+        setFormError("Falta completar: " + faltantes.join(", "));
+        return;
+      }
+      const clienteU = up(form.cliente.trim());
+      const direccionU = up(form.direccion.trim());
+      const facturaU = up(form.factura.trim());
+
+      if (editingId) {
+        setItems((prev) => {
+          const next = (prev || []).map((it) =>
+            it.id === editingId
+              ? {
+                  ...it,
+                  cliente: clienteU,
+                  direccion: direccionU,
+                  monto: parseFloat(form.monto) || 0,
+                  factura: facturaU,
+                  estado: form.estado,
+                  notas: form.notas.trim(),
+                  prioridad: it.estadoProceso === "pendiente" ? form.prioridad : it.prioridad,
+                }
+              : it
+          );
+          persist(next);
+          return next;
+        });
+        const nextRefEdit = {
+          ...refLists,
+          clientes: addOrReactivar(refLists.clientes, clienteU),
+          direcciones: addOrReactivar(refLists.direcciones, direccionU),
+        };
+        if (nextRefEdit.clientes !== refLists.clientes || nextRefEdit.direcciones !== refLists.direcciones) {
+          persistRefLists(nextRefEdit);
+        }
+        setEditingId(null);
+        setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+        showToast("Registro actualizado.");
+        return;
+      }
+
+      const usados = new Set((items || []).map((x) => x.no));
+      let siguienteNo = 1;
+      while (usados.has(siguienteNo)) siguienteNo++;
+
+      const { fecha, hora, ts } = nowParts();
+      const entry = {
+        id: genId(),
+        no: siguienteNo,
+        fecha, hora, ts,
+        cliente: clienteU,
+        direccion: direccionU,
+        monto: parseFloat(form.monto) || 0,
+        factura: facturaU,
+        chofer: "",
+        estado: form.estado,
+        estadoProceso: "pendiente",
+        prioridad: form.prioridad,
+        notas: form.notas.trim(),
+        tsProcesada: null,
+        tsFinalizada: null,
+        finalizado: false, horaFinal: "", fechaFinal: "",
+      };
+      setItems((prev) => {
+        const next = [entry, ...(prev || [])];
+        persist(next);
+        return next;
+      });
+      const nextRef = {
+        ...refLists,
+        clientes: addOrReactivar(refLists.clientes, clienteU),
+        direcciones: addOrReactivar(refLists.direcciones, direccionU),
+      };
+      if (nextRef.clientes !== refLists.clientes || nextRef.direcciones !== refLists.direcciones) {
+        persistRefLists(nextRef);
+      }
+      setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+      showToast("Entrega registrada como pendiente.");
+    } catch (err) {
+      setCrashError("Error al agregar: " + (err?.message || String(err)));
+    }
+  }
+
+  function startEdit(it) {
+    setEditingId(it.id);
+    setForm({
+      cliente: it.cliente, direccion: it.direccion, monto: String(it.monto),
+      factura: it.factura, estado: it.estado, notas: it.notas || "", prioridad: it.prioridad || "media",
+    });
+    setFormError("");
+    setVista("entregas");
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setForm({ cliente: "", direccion: "", monto: "", factura: "", estado: "Factura por Cobrar", notas: "", prioridad: "media" });
+    setFormError("");
+  }
+
+  function cambiarPrioridad(id, prioridad) {
+    const next = (items || []).map((it) => (it.id === id ? { ...it, prioridad } : it));
+    persist(next);
+  }
+
+  function abrirProcesar(it) {
+    setProcesarError("");
+    setProcesarModal({ id: it.id, chofer: "" });
+  }
+
+  function confirmarProcesar() {
+    if (!procesarModal || !procesarModal.chofer.trim()) {
+      setProcesarError("Selecciona un chofer.");
+      return;
+    }
+    const choferU = up(procesarModal.chofer.trim());
+    const { fecha: fechaProcesada, hora: horaProcesada, ts: tsProcesada } = nowParts();
+    setItems((prev) => {
+      const next = prev.map((it) =>
+        it.id === procesarModal.id ? { ...it, chofer: choferU, estadoProceso: "en_ejecucion", tsProcesada, horaProcesada, fechaProcesada } : it
+      );
+      persist(next);
+      return next;
+    });
+    const nextRef = { ...refLists, choferes: addOrReactivar(refLists.choferes, choferU) };
+    if (nextRef.choferes !== refLists.choferes) persistRefLists(nextRef);
+    setProcesarModal(null);
+    setProcesarError("");
+    showToast("Entrega procesada y asignada.");
+  }
+
+  function toggleFinal(id) {
+    const next = (items || []).map((it) => {
+      if (it.id !== id) return it;
+      if (it.estadoProceso === "finalizada") {
+        return { ...it, estadoProceso: "en_ejecucion", finalizado: false, tsFinalizada: null, horaFinal: "", fechaFinal: "" };
+      }
+      const { fecha, hora, ts } = nowParts();
+      return { ...it, estadoProceso: "finalizada", finalizado: true, tsFinalizada: ts, horaFinal: hora, fechaFinal: fecha };
+    });
+    persist(next);
+  }
+
+  function toggleEstado(id) {
+    const next = (items || []).map((it) => {
+      if (it.id !== id) return it;
+      return { ...it, estado: it.estado === "Factura Pagada" ? "Factura por Cobrar" : "Factura Pagada" };
+    });
+    persist(next);
+  }
+
+  function removeEntry(id) {
+    setConfirmModal({
+      message: "Este registro se eliminará permanentemente y su monto se descontará del total.\n\n¿Deseas continuar?",
+      onYes: () => {
+        const restantes = (items || []).filter((it) => it.id !== id);
+        const ordenados = [...restantes].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+        const renumerados = restantes.map((it) => ({ ...it, no: ordenados.findIndex((o) => o.id === it.id) + 1 }));
+        persist(renumerados);
+      },
+    });
+  }
+
+  const choferesActivos = useMemo(() => nombresActivos(refLists.choferes).sort(), [refLists.choferes]);
+  const clientesActivos = useMemo(() => nombresActivos(refLists.clientes), [refLists.clientes]);
+  const direccionesActivas = useMemo(() => nombresActivos(refLists.direcciones), [refLists.direcciones]);
+
+  const pendientes = useMemo(() => {
+    return (items || []).filter((it) => it.estadoProceso === "pendiente").sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  }, [items]);
+
+  const montoPendiente = useMemo(() => pendientes.reduce((s, it) => s + (it.monto || 0), 0), [pendientes]);
+
+  const filtered = useMemo(() => {
+    const base = (items || []).filter((it) => it.estadoProceso !== "pendiente");
+    const q = busqueda.trim().toUpperCase();
+    if (q) {
+      return base
+        .filter((it) => it.cliente.includes(q) || it.factura.includes(q))
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    }
+    if (modoFiltro === "dia") {
+      return base
+        .filter((it) => it.fecha === fDia)
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    }
+    return base
+      .filter((it) => {
+        const d = new Date(it.fecha + "T00:00:00");
+        const okMes = d.getMonth() + 1 === Number(fMes);
+        const okAnio = d.getFullYear() === Number(fAnio);
+        return okMes && okAnio;
+      })
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  }, [items, fMes, fAnio, busqueda, modoFiltro, fDia]);
+
+  useEffect(() => {
+    setPaginaActual(1);
+  }, [fMes, fAnio, busqueda, modoFiltro, fDia]);
+
+  const totalPaginas = Math.max(1, Math.ceil(filtered.length / FILAS_POR_PAGINA));
+  const paginaSegura = Math.min(paginaActual, totalPaginas);
+  const filteredPagina = useMemo(() => {
+    const inicio = (paginaSegura - 1) * FILAS_POR_PAGINA;
+    return filtered.slice(inicio, inicio + FILAS_POR_PAGINA);
+  }, [filtered, paginaSegura]);
+
+  const kpis = useMemo(() => {
+    let facturado = 0, cobrado = 0, porCobrar = 0;
+    filtered.forEach((it) => {
+      facturado += it.monto;
+      if (it.estado === "Factura Pagada") cobrado += it.monto;
+      else porCobrar += it.monto;
+    });
+    return { facturado, cobrado, porCobrar, cantidad: filtered.length };
+  }, [filtered]);
+
+  const hoyISO = diaVentaDe(Date.now());
+  const itemsHoy = useMemo(() => {
+    return (items || [])
+      .filter((it) => diaVentaDe(it.ts || new Date(it.fecha + "T12:00:00").getTime()) === hoyISO)
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  }, [items, hoyISO]);
+
+  const kpisHoy = useMemo(() => {
+    let facturado = 0, cobrado = 0, porCobrar = 0;
+    itemsHoy.forEach((it) => {
+      facturado += it.monto;
+      if (it.estado === "Factura Pagada") cobrado += it.monto;
+      else porCobrar += it.monto;
+    });
+    return { facturado, cobrado, porCobrar, cantidad: itemsHoy.length };
+  }, [itemsHoy]);
+
+  function exportExcel() {
+    if (filtered.length === 0) { showToast("No hay datos para exportar con este filtro."); return; }
+
+    const periodoLabel = modoFiltro === "dia" ? fDia : `${meses[fMes - 1]} ${fAnio}`;
+
+    const aoaReportes = [
+      [`REPORTE DE VENTAS · ${configNegocio.nombre || "MI NEGOCIO"}`],
+      [],
+      ["Periodo filtrado:", periodoLabel],
+      [],
+      ["Total Facturado", "Total Cobrado", "Total por Cobrar", "Cantidad de Entregas"],
+      [kpis.facturado, kpis.cobrado, kpis.porCobrar, kpis.cantidad],
+    ];
+    const wsReportes = XLSX.utils.aoa_to_sheet(aoaReportes);
+    wsReportes["!cols"] = [{ wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
+
+    const rows = filtered.map((it) => ({
+      "No.": it.no, "Fecha": it.fecha, "Cliente": it.cliente, "Direccion": it.direccion,
+      "Monto": it.monto, "#Factura": it.factura, "Chofer": it.chofer, "Estado pago": it.estado,
+      "Estado proceso": ESTADO_PROCESO[it.estadoProceso]?.label || it.estadoProceso,
+      "Monto por Cobrar": it.estado === "Factura por Cobrar" ? it.monto : 0,
+      "Hora Salida": it.hora, "Finalizado": it.finalizado ? "SI" : "NO",
+      "Hora Final": it.horaFinal, "Fecha Final": it.fechaFinal,
+      "Tiempo de demora": formatDuracion(demoraDe(it, Date.now())),
+    }));
+    const wsEntregas = XLSX.utils.json_to_sheet(rows);
+    wsEntregas["!cols"] = [{ wch: 5 }, { wch: 11 }, { wch: 20 }, { wch: 18 }, { wch: 11 }, { wch: 10 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 15 }, { wch: 11 }, { wch: 10 }, { wch: 11 }, { wch: 11 }, { wch: 14 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsReportes, "Reportes");
+    XLSX.utils.book_append_sheet(wb, wsEntregas, "Entregas");
+    const nombreArchivo = modoFiltro === "dia" ? `Control_Entregas_${fDia}.xlsx` : `Control_Entregas_${fAnio}_${String(fMes).padStart(2, "0")}.xlsx`;
+    XLSX.writeFile(wb, nombreArchivo);
+    showToast("Reporte descargado.");
+  }
+
+  const meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+  const anioActual = new Date().getFullYear();
+  const anios = [anioActual - 1, anioActual, anioActual + 1];
+
+  const inputStyle = {
+    fontFamily: "inherit", fontSize: 14, padding: "7px 9px",
+    border: `1px solid ${COLORS.border}`, borderRadius: 4, background: "#fff", color: COLORS.ink, width: "100%",
+  };
+  const labelStyle = { fontSize: 11, color: COLORS.inkSoft, marginBottom: 4, display: "block" };
+  const navBtnStyle = (activo) => ({
+    fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, padding: "8px 16px", borderRadius: 6, cursor: "pointer",
+    border: `1px solid ${activo ? COLORS.ink : COLORS.border}`,
+    background: activo ? COLORS.ink : "#fff",
+    color: activo ? "#fff" : COLORS.inkSoft,
+  });
+
+  if (!loaded) {
+    return <div style={{ padding: 40, textAlign: "center", color: COLORS.inkSoft, background: COLORS.bg, minHeight: "100vh" }}>Cargando registro...</div>;
+  }
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", background: COLORS.bg, color: COLORS.ink, minHeight: "100%", padding: "20px 16px 60px" }}>
+      <div style={{ maxWidth: 1080, margin: "0 auto" }}>
+
+        {crashError && (
+          <div style={{ background: "#3a1414", color: "#ffb4a8", border: "1px solid #B23A2E", borderRadius: 6, padding: "10px 14px", marginBottom: 14, fontSize: 13, fontFamily: "monospace" }}>
+            ⚠ Error técnico: {crashError}
+          </div>
+        )}
+
+        {/* Masthead */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, borderBottom: `3px solid ${COLORS.ink}`, paddingBottom: 14, marginBottom: 14 }}>
+          <div>
+            <h1 style={{ ...mono, fontSize: 22, letterSpacing: 0.5, margin: 0, textTransform: "uppercase" }}>{configNegocio.nombre || "Mi Negocio"}</h1>
+            <p style={{ margin: "4px 0 0", color: COLORS.inkSoft, fontSize: 13 }}>{configNegocio.direccion || "Control de entregas"}</p>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <button
+              onClick={refrescarManual}
+              disabled={refrescando}
+              title="Volver a cargar los datos guardados (para ver lo que otros hayan agregado)"
+              style={{
+                display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit", fontSize: 12.5, fontWeight: 600,
+                padding: "6px 12px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: refrescando ? "default" : "pointer",
+                background: "#fff", color: COLORS.ink, opacity: refrescando ? 0.6 : 1,
+              }}
+            >
+              <span style={{ display: "inline-block" }}>🔄</span>
+              {refrescando ? "Actualizando..." : "Actualizar datos"}
+            </button>
+            <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: COLORS.inkSoft, cursor: "pointer", userSelect: "none" }}>
+              <input type="checkbox" checked={reportsVisible} onChange={handleToggleReports} style={{ width: 15, height: 15, cursor: "pointer", accentColor: COLORS.teal }} />
+              🔒 Ver reportes
+            </label>
+            <span style={{ ...mono, fontSize: 11, color: COLORS.teal, background: COLORS.tealBg, border: `1px solid ${COLORS.teal}`, padding: "3px 8px", borderRadius: 3, whiteSpace: "nowrap" }}>
+              ● auto-actualiza cada 30s
+            </span>
+            {usuarioEmail && (
+              <span style={{ fontSize: 11.5, color: COLORS.inkSoft, display: "flex", alignItems: "center", gap: 8 }}>
+                {usuarioEmail}
+                <button
+                  onClick={onCerrarSesion}
+                  style={{ fontFamily: "inherit", fontSize: 11.5, fontWeight: 600, color: COLORS.due, background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}
+                >
+                  Cerrar sesión
+                </button>
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Navegación de secciones */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+          <button onClick={() => setVista("entregas")} style={navBtnStyle(vista === "entregas")}>Entregas</button>
+          <button onClick={() => setVista("pendientes")} style={navBtnStyle(vista === "pendientes")}>
+            Pendientes {pendientes.length > 0 ? `(${pendientes.length})` : ""}
+          </button>
+          <button onClick={abrirMantenimiento} style={navBtnStyle(vista === "mantenimiento")}>🔧 Mantenimiento</button>
+        </div>
+
+        {showPwPrompt && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: COLORS.ink }}>🔒 Reportes protegidos</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 12 }}>Ingresa la contraseña para ver los reportes.</div>
+              <input
+                type="password"
+                autoFocus
+                value={pwInput}
+                onChange={(e) => { setPwInput(e.target.value); setPwError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmPassword(); }}
+                placeholder="Contraseña"
+                style={{ width: "100%", fontSize: 15, padding: "9px 10px", border: `1px solid ${pwError ? COLORS.due : COLORS.border}`, borderRadius: 4, marginBottom: 8, boxSizing: "border-box" }}
+              />
+              {pwError && <div style={{ color: COLORS.due, fontSize: 12, marginBottom: 8 }}>{pwError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                <button onClick={() => setShowPwPrompt(false)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmPassword} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>Ver reportes</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showWipePwPrompt && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: COLORS.due }}>⚠ Borrado total</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 12 }}>Ingresa la contraseña de administrador para borrar todos los registros.</div>
+              <input
+                type="password"
+                autoFocus
+                value={wipePwInput}
+                onChange={(e) => { setWipePwInput(e.target.value); setWipePwError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmarWipePassword(); }}
+                placeholder="Contraseña"
+                style={{ width: "100%", fontSize: 15, padding: "9px 10px", border: `1px solid ${wipePwError ? COLORS.due : COLORS.border}`, borderRadius: 4, marginBottom: 8, boxSizing: "border-box" }}
+              />
+              {wipePwError && <div style={{ color: COLORS.due, fontSize: 12, marginBottom: 8 }}>{wipePwError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                <button onClick={() => setShowWipePwPrompt(false)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmarWipePassword} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.due, color: "#fff" }}>Continuar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showMantPwPrompt && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 320, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: COLORS.ink }}>🔧 Mantenimiento protegido</div>
+              <div style={{ fontSize: 12.5, color: COLORS.inkSoft, marginBottom: 12 }}>Ingresa la contraseña administrativa para entrar a Mantenimiento.</div>
+              <input
+                type="password"
+                autoFocus
+                value={mantPwInput}
+                onChange={(e) => { setMantPwInput(e.target.value); setMantPwError(""); }}
+                onKeyDown={(e) => { if (e.key === "Enter") confirmarMantPassword(); }}
+                placeholder="Contraseña"
+                style={{ width: "100%", fontSize: 15, padding: "9px 10px", border: `1px solid ${mantPwError ? COLORS.due : COLORS.border}`, borderRadius: 4, marginBottom: 8, boxSizing: "border-box" }}
+              />
+              {mantPwError && <div style={{ color: COLORS.due, fontSize: 12, marginBottom: 8 }}>{mantPwError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+                <button onClick={() => setShowMantPwPrompt(false)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmarMantPassword} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.ink, color: "#fff" }}>Entrar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {procesarModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 10, color: COLORS.ink }}>Procesar entrega</div>
+              <label style={labelStyle}>Selecciona el chofer</label>
+              <SuggestInput
+                value={procesarModal.chofer}
+                onChange={(v) => setProcesarModal({ ...procesarModal, chofer: v })}
+                options={choferesActivos}
+                placeholder="NOMBRE DEL CHOFER"
+                inputStyle={inputStyle}
+              />
+              {procesarError && <div style={{ color: COLORS.due, fontSize: 12, marginTop: 8 }}>{procesarError}</div>}
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
+                <button onClick={() => setProcesarModal(null)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={confirmarProcesar} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>Confirmar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 360, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontSize: 13.5, color: COLORS.ink, marginBottom: 16, whiteSpace: "pre-line", lineHeight: 1.5 }}>{confirmModal.message}</div>
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmModal(null)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={() => { confirmModal.onYes(); setConfirmModal(null); }} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.due, color: "#fff" }}>Aceptar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {promptModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(20,22,26,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+            <div style={{ background: "#fff", borderRadius: 8, padding: 22, width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.25)" }}>
+              <div style={{ fontSize: 13.5, color: COLORS.ink, marginBottom: 10 }}>{promptModal.message}</div>
+              <input
+                autoFocus
+                value={promptModal.value}
+                onChange={(e) => setPromptModal({ ...promptModal, value: e.target.value })}
+                onKeyDown={(e) => { if (e.key === "Enter") { promptModal.onYes(promptModal.value); setPromptModal(null); } }}
+                style={{ width: "100%", fontSize: 14, padding: "8px 10px", border: `1px solid ${COLORS.border}`, borderRadius: 4, marginBottom: 12, boxSizing: "border-box", textTransform: "uppercase" }}
+              />
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setPromptModal(null)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>Cancelar</button>
+                <button onClick={() => { promptModal.onYes(promptModal.value); setPromptModal(null); }} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>Guardar</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {vista === "entregas" && (
+          <>
+        {reportsVisible && (
+        <>
+        {/* KPIs */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 20 }}>
+          {[
+            { label: "Total facturado", value: kpis.facturado, border: COLORS.rust },
+            { label: "Cobrado", value: kpis.cobrado, border: COLORS.paid },
+            { label: "Por cobrar", value: kpis.porCobrar, border: COLORS.due },
+            { label: "Entregas", value: kpis.cantidad, border: COLORS.ink, raw: true },
+          ].map((k) => (
+            <div key={k.label} style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${k.border}`, padding: "12px 14px", borderRadius: 4 }}>
+              <div style={{ fontSize: 11, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>{k.label}</div>
+              <div style={{ ...mono, fontSize: 20, fontWeight: 700, marginTop: 4 }}>{k.raw ? k.value : money(k.value)}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Reporte de hoy */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 4px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            Reporte de hoy · {hoyISO}
+          </h2>
+          <p style={{ fontSize: 11, color: COLORS.inkSoft, margin: "0 0 12px" }}>El día de ventas se reinicia a medianoche (12:00 AM).</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            {[
+              { label: "Facturado hoy", value: kpisHoy.facturado, border: COLORS.rust },
+              { label: "Cobrado hoy", value: kpisHoy.cobrado, border: COLORS.paid },
+              { label: "Por cobrar hoy", value: kpisHoy.porCobrar, border: COLORS.due },
+              { label: "Entregas hoy", value: kpisHoy.cantidad, border: COLORS.ink, raw: true },
+            ].map((k) => (
+              <div key={k.label} style={{ background: COLORS.bg, border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${k.border}`, padding: "10px 12px", borderRadius: 4 }}>
+                <div style={{ fontSize: 10.5, color: COLORS.inkSoft, textTransform: "uppercase", letterSpacing: 0.4 }}>{k.label}</div>
+                <div style={{ ...mono, fontSize: 17, fontWeight: 700, marginTop: 3 }}>{k.raw ? k.value : money(k.value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Filtros */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 12px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>Filtrar reporte</h2>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            {[{ v: "mes", label: "Mensual" }, { v: "dia", label: "Por día" }].map((opt) => (
+              <button
+                key={opt.v}
+                onClick={() => setModoFiltro(opt.v)}
+                style={{
+                  fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, padding: "6px 14px", borderRadius: 20, cursor: "pointer",
+                  border: `1px solid ${modoFiltro === opt.v ? COLORS.ink : COLORS.border}`,
+                  background: modoFiltro === opt.v ? COLORS.ink : "transparent",
+                  color: modoFiltro === opt.v ? "#fff" : COLORS.inkSoft,
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+            {modoFiltro === "mes" ? (
+              <>
+                <div>
+                  <label style={labelStyle}>Mes</label>
+                  <select style={inputStyle} value={fMes} onChange={(e) => setFMes(e.target.value)}>
+                    {meses.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Año</label>
+                  <select style={inputStyle} value={fAnio} onChange={(e) => setFAnio(e.target.value)}>
+                    {anios.map((a) => <option key={a} value={a}>{a}</option>)}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <div>
+                <label style={labelStyle}>Día</label>
+                <input type="date" style={inputStyle} value={fDia} onChange={(e) => setFDia(e.target.value)} />
+              </div>
+            )}
+            <div style={{ flex: 1 }} />
+            <button onClick={exportExcel} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.ink, color: "#fff" }}>
+              ⬇ Descargar reporte Excel
+            </button>
+          </div>
+        </div>
+        </>
+        )}
+
+        {/* Formulario */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
+          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 12px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            {editingId ? "Editar entrega" : "Registrar nueva entrega"}
+          </h2>
+          {!editingId && (
+            <p style={{ fontSize: 11.5, color: COLORS.inkSoft, margin: "0 0 12px" }}>
+              La entrega se guarda como <b>Pendiente</b>. El chofer se asigna después, desde el panel "Pendientes", al procesarla.
+            </p>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+            <div style={{ gridColumn: "span 2" }}>
+              <label style={labelStyle}>Cliente</label>
+              <SuggestInput value={form.cliente} onChange={(v) => setForm({ ...form, cliente: v })} options={clientesActivos} placeholder="NOMBRE DEL CLIENTE" inputStyle={inputStyle} />
+            </div>
+            <div style={{ gridColumn: "span 2" }}>
+              <label style={labelStyle}>Dirección</label>
+              <SuggestInput value={form.direccion} onChange={(v) => setForm({ ...form, direccion: v })} options={direccionesActivas} placeholder="SECTOR / DIRECCIÓN" inputStyle={inputStyle} />
+            </div>
+            <div>
+              <label style={labelStyle}>Monto (B/.)</label>
+              <input type="number" step="0.01" style={inputStyle} value={form.monto} onChange={(e) => setForm({ ...form, monto: e.target.value })} placeholder="0.00" />
+            </div>
+            <div>
+              <label style={labelStyle}>#Factura</label>
+              <input style={{ ...inputStyle, textTransform: "uppercase" }} value={form.factura} onChange={(e) => setForm({ ...form, factura: up(e.target.value) })} placeholder="20160" />
+            </div>
+            <div>
+              <label style={labelStyle}>Estado de pago</label>
+              <select style={inputStyle} value={form.estado} onChange={(e) => setForm({ ...form, estado: e.target.value })}>
+                <option value="Factura por Cobrar">Factura por Cobrar</option>
+                <option value="Factura Pagada">Factura Pagada</option>
+              </select>
+            </div>
+            {(!editingId || (editingId && form && items?.find((x) => x.id === editingId)?.estadoProceso === "pendiente")) && (
+              <div>
+                <label style={labelStyle}>Prioridad</label>
+                <select style={inputStyle} value={form.prioridad} onChange={(e) => setForm({ ...form, prioridad: e.target.value })}>
+                  <option value="alta">🔴 Alta</option>
+                  <option value="media">🟡 Media</option>
+                  <option value="baja">🟢 Baja</option>
+                </select>
+              </div>
+            )}
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label style={labelStyle}>Notas / observaciones</label>
+              <input style={inputStyle} value={form.notas} onChange={(e) => setForm({ ...form, notas: e.target.value })} placeholder="Ej: Llamar antes de llegar, entregar en recepción..." />
+            </div>
+            <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ color: COLORS.due, fontSize: 12.5, fontWeight: 600 }}>{formError}</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                {editingId && (
+                  <button type="button" onClick={cancelEdit} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: `1px solid ${COLORS.border}`, borderRadius: 4, cursor: "pointer", background: "transparent", color: COLORS.inkSoft }}>
+                    Cancelar
+                  </button>
+                )}
+                <button type="button" onClick={addEntry} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: editingId ? COLORS.teal : COLORS.rust, color: "#fff" }}>
+                  {editingId ? "Guardar cambios" : "+ Agregar entrega"}
+                </button>
+              </div>
+            </div>
+          </div>
+          {saveError && (
+            <div style={{ marginTop: 10, fontSize: 12.5, color: COLORS.due, background: COLORS.dueBg, border: `1px solid ${COLORS.due}`, borderRadius: 4, padding: "8px 10px" }}>
+              ⚠ {saveError}
+            </div>
+          )}
+        </div>
+
+        {/* Tabla */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>
+            <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: 0, color: COLORS.inkSoft }}>
+              {busqueda.trim()
+                ? `Resultados de búsqueda (${filtered.length})`
+                : modoFiltro === "dia"
+                ? `Entregas del ${fDia} (${filtered.length})`
+                : `Entregas del mes (${filtered.length})`}
+            </h2>
+            <div style={{ position: "relative", width: 260 }}>
+              <input
+                value={busqueda}
+                onChange={(e) => setBusqueda(e.target.value.toUpperCase())}
+                placeholder="🔎 BUSCAR CLIENTE O #FACTURA"
+                style={{ ...inputStyle, textTransform: "uppercase", paddingRight: busqueda ? 30 : 9 }}
+              />
+              {busqueda && (
+                <button
+                  onClick={() => setBusqueda("")}
+                  title="Limpiar búsqueda"
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14 }}
+                >✕</button>
+              )}
+            </div>
+          </div>
+          {busqueda.trim() && (
+            <div style={{ fontSize: 11.5, color: COLORS.inkSoft, marginBottom: 10 }}>
+              Buscando en todo el historial (no solo el mes filtrado). Borra la búsqueda para volver al reporte por mes.
+            </div>
+          )}
+          {filtered.length === 0 ? (
+            <div style={{ textAlign: "center", color: COLORS.inkSoft, padding: "30px 0", fontSize: 13 }}>
+              {busqueda.trim() ? "No se encontraron coincidencias." : "No hay entregas procesadas todavía con este filtro. Revisa el panel \"Pendientes\" si acabas de registrar una."}
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    {["No.", "Fecha", "Cliente", "Dirección", "Monto", "Factura", "Chofer", "Estado pago", "Proceso", "Demora", "Hora procesada", "Finalizada", ""].map((h) => (
+                      <th key={h} style={{ textAlign: "left", fontSize: 11, textTransform: "uppercase", color: COLORS.inkSoft, borderBottom: `2px solid ${COLORS.ink}`, padding: "8px 8px", whiteSpace: "nowrap" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPagina.map((it) => (
+                    <tr key={it.id}>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.no}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.fecha}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.cliente}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.direccion}</td>
+                      <td style={{ ...mono, textAlign: "right", padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{money(it.monto)}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.factura}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.chofer}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <span
+                          onClick={() => toggleEstado(it.id)}
+                          title="Clic para cambiar estado de pago"
+                          style={{
+                            fontSize: 11, padding: "3px 8px", borderRadius: 20, fontWeight: 600, cursor: "pointer", display: "inline-block",
+                            background: it.estado === "Factura Pagada" ? COLORS.paidBg : COLORS.dueBg,
+                            color: it.estado === "Factura Pagada" ? COLORS.paid : COLORS.due,
+                          }}
+                        >
+                          {it.estado}
+                        </span>
+                      </td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 20, fontWeight: 600, display: "inline-block", background: ESTADO_PROCESO[it.estadoProceso]?.bg, color: ESTADO_PROCESO[it.estadoProceso]?.text }}>
+                          {ESTADO_PROCESO[it.estadoProceso]?.label || it.estadoProceso}
+                        </span>
+                      </td>
+                      <td style={{ ...mono, padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}`, whiteSpace: "nowrap" }}>
+                        {formatDuracion(demoraDe(it, Date.now()))}
+                      </td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.horaProcesada || it.hora}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <input type="checkbox" checked={it.estadoProceso === "finalizada"} onChange={() => toggleFinal(it.id)} style={{ width: 17, height: 17, cursor: "pointer", accentColor: COLORS.teal }} />
+                      </td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => startEdit(it)} title="Editar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14 }}>✎</button>
+                          <button onClick={() => removeEntry(it.id)} title="Eliminar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 15 }}>✕</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {totalPaginas > 1 && (
+            <div style={{ display: "flex", justifyContent: "center", gap: 6, marginTop: 14, flexWrap: "wrap" }}>
+              <button
+                onClick={() => setPaginaActual((p) => Math.max(1, p - 1))}
+                disabled={paginaSegura === 1}
+                style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 600, padding: "6px 10px", borderRadius: 4, border: `1px solid ${COLORS.border}`, background: "#fff", color: COLORS.inkSoft, cursor: paginaSegura === 1 ? "default" : "pointer", opacity: paginaSegura === 1 ? 0.4 : 1 }}
+              >‹</button>
+              {Array.from({ length: totalPaginas }, (_, i) => i + 1).map((n) => (
+                <button
+                  key={n}
+                  onClick={() => setPaginaActual(n)}
+                  style={{
+                    fontFamily: "inherit", fontSize: 12, fontWeight: 700, padding: "6px 11px", borderRadius: 4, cursor: "pointer",
+                    border: `1px solid ${n === paginaSegura ? COLORS.ink : COLORS.border}`,
+                    background: n === paginaSegura ? COLORS.ink : "#fff",
+                    color: n === paginaSegura ? "#fff" : COLORS.inkSoft,
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+              <button
+                onClick={() => setPaginaActual((p) => Math.min(totalPaginas, p + 1))}
+                disabled={paginaSegura === totalPaginas}
+                style={{ fontFamily: "inherit", fontSize: 12, fontWeight: 600, padding: "6px 10px", borderRadius: 4, border: `1px solid ${COLORS.border}`, background: "#fff", color: COLORS.inkSoft, cursor: paginaSegura === totalPaginas ? "default" : "pointer", opacity: paginaSegura === totalPaginas ? 0.4 : 1 }}
+              >›</button>
+            </div>
+          )}
+        </div>
+
+        {/* Zona de administración */}
+        <div style={{ marginTop: 24, textAlign: "center" }}>
+          <button
+            onClick={abrirBorrarTodo}
+            style={{ fontFamily: "inherit", fontSize: 11.5, color: COLORS.inkSoft, background: "none", border: "none", cursor: "pointer", textDecoration: "underline", opacity: 0.7 }}
+          >
+            ⚠ Zona de administración: borrar todos los registros
+          </button>
+        </div>
+        </>
+        )}
+
+        {vista === "pendientes" && (
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8, marginBottom: 14 }}>
+              <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: 0, color: COLORS.inkSoft }}>
+                Entregas pendientes de procesar ({pendientes.length})
+              </h2>
+              <span style={{ ...mono, fontSize: 13, fontWeight: 700 }}>{money(montoPendiente)} en pendientes</span>
+            </div>
+            {pendientes.length === 0 ? (
+              <div style={{ textAlign: "center", color: COLORS.inkSoft, padding: "30px 0", fontSize: 13 }}>
+                No hay entregas pendientes por procesar. Las que registres nuevas aparecerán aquí primero.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {pendientes.map((it) => (
+                  <div key={it.id} style={{ border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${PRIORIDADES[it.prioridad]?.text || COLORS.border}`, borderRadius: 6, padding: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 14 }}>{it.cliente}</div>
+                        <div style={{ fontSize: 12, color: COLORS.inkSoft }}>{it.direccion || "Sin dirección"}</div>
+                      </div>
+                      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                        <span style={{ ...mono, fontSize: 13, fontWeight: 700 }}>{money(it.monto)}</span>
+                        <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>#{it.factura || "—"}</span>
+                        <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{it.fecha} · {it.hora}</span>
+                      </div>
+                    </div>
+                    {it.notas && (
+                      <div style={{ marginTop: 6, fontSize: 12, color: COLORS.ink, background: COLORS.bg, borderRadius: 4, padding: "6px 8px" }}>
+                        📝 {it.notas}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 10 }}>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {Object.entries(PRIORIDADES).map(([k, v]) => (
+                          <button
+                            key={k}
+                            onClick={() => cambiarPrioridad(it.id, k)}
+                            style={{
+                              fontFamily: "inherit", fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 20, cursor: "pointer",
+                              border: it.prioridad === k ? `1px solid ${v.text}` : `1px solid ${COLORS.border}`,
+                              background: it.prioridad === k ? v.bg : "transparent",
+                              color: it.prioridad === k ? v.text : COLORS.inkSoft,
+                            }}
+                          >
+                            {v.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={() => startEdit(it)} title="Editar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 14 }}>✎</button>
+                        <button onClick={() => removeEntry(it.id)} title="Eliminar" style={{ background: "none", border: "none", color: COLORS.inkSoft, cursor: "pointer", fontSize: 15 }}>✕</button>
+                        <button
+                          onClick={() => abrirProcesar(it)}
+                          style={{ fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, padding: "7px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.rust, color: "#fff" }}
+                        >
+                          Procesar entrega
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {vista === "mantenimiento" && mantenimientoAuth && (
+          <div>
+            <div style={{ background: COLORS.goldBg, border: `1px solid ${COLORS.gold}`, borderRadius: 6, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: COLORS.gold, fontWeight: 600 }}>
+              🔧 Estás dentro del panel administrativo de Mantenimiento.
+            </div>
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+              {[
+                { v: "negocio", label: "Datos del negocio" },
+                { v: "seguridad", label: "Seguridad" },
+                { v: "choferes", label: "Choferes" },
+                { v: "clientes", label: "Clientes" },
+                { v: "direcciones", label: "Direcciones" },
+              ].map((s) => (
+                <button
+                  key={s.v}
+                  onClick={() => { setMantSeccion(s.v); setBuscarMant(""); }}
+                  style={{
+                    fontFamily: "inherit", fontSize: 12, fontWeight: 600, padding: "6px 12px", borderRadius: 20, cursor: "pointer",
+                    border: `1px solid ${mantSeccion === s.v ? COLORS.ink : COLORS.border}`,
+                    background: mantSeccion === s.v ? COLORS.ink : "transparent",
+                    color: mantSeccion === s.v ? "#fff" : COLORS.inkSoft,
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+
+            {mantSeccion === "negocio" && (
+              <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, maxWidth: 480 }}>
+                <label style={labelStyle}>Nombre del negocio</label>
+                <input style={{ ...inputStyle, marginBottom: 12 }} value={nombreNegocioInput} onChange={(e) => setNombreNegocioInput(e.target.value)} />
+                <label style={labelStyle}>Dirección del negocio</label>
+                <input style={{ ...inputStyle, marginBottom: 12 }} value={direccionNegocioInput} onChange={(e) => setDireccionNegocioInput(e.target.value)} />
+                <button onClick={guardarDatosNegocio} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 700, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.rust, color: "#fff" }}>
+                  Guardar
+                </button>
+                {negocioMsg && <div style={{ marginTop: 10, color: COLORS.paid, fontSize: 12.5, fontWeight: 600 }}>{negocioMsg}</div>}
+              </div>
+            )}
+
+            {mantSeccion === "seguridad" && (
+              <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, maxWidth: 480 }}>
+                <h3 style={{ fontSize: 13, margin: "0 0 10px", color: COLORS.inkSoft, textTransform: "uppercase" }}>Contraseña del panel de Reportes</h3>
+                <label style={labelStyle}>Nueva contraseña</label>
+                <input type="password" style={{ ...inputStyle, marginBottom: 10 }} value={nuevoPwReporte} onChange={(e) => setNuevoPwReporte(e.target.value)} />
+                <label style={labelStyle}>Confirmar nueva contraseña</label>
+                <input type="password" style={{ ...inputStyle, marginBottom: 12 }} value={nuevoPwReporteConfirm} onChange={(e) => setNuevoPwReporteConfirm(e.target.value)} />
+                <button onClick={guardarNuevaPwReporte} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 700, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.rust, color: "#fff" }}>
+                  Actualizar contraseña
+                </button>
+                {pwSeguridadMsg && <div style={{ marginTop: 10, color: pwSeguridadMsg.startsWith("✓") ? COLORS.paid : COLORS.due, fontSize: 12.5, fontWeight: 600 }}>{pwSeguridadMsg}</div>}
+                <p style={{ fontSize: 11, color: COLORS.inkSoft, marginTop: 14 }}>
+                  La contraseña de Mantenimiento y la de "borrar todo" son fijas por seguridad y no se cambian desde aquí.
+                </p>
+              </div>
+            )}
+
+            {["choferes", "clientes", "direcciones"].includes(mantSeccion) && (
+              <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16 }}>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label style={labelStyle}>Agregar {mantSeccion === "choferes" ? "chofer" : mantSeccion === "clientes" ? "cliente" : "dirección"} nuevo</label>
+                    <input
+                      style={{ ...inputStyle, textTransform: "uppercase" }}
+                      value={nuevoItemCat[mantSeccion]}
+                      onChange={(e) => setNuevoItemCat({ ...nuevoItemCat, [mantSeccion]: up(e.target.value) })}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); catAgregar(mantSeccion); } }}
+                      placeholder="NOMBRE"
+                    />
+                  </div>
+                  <button onClick={() => catAgregar(mantSeccion)} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.teal, color: "#fff" }}>
+                    + Agregar
+                  </button>
+                  <div style={{ flex: "1 1 200px" }}>
+                    <label style={labelStyle}>Buscar</label>
+                    <input style={inputStyle} value={buscarMant} onChange={(e) => setBuscarMant(e.target.value.toUpperCase())} placeholder="🔎 BUSCAR..." />
+                  </div>
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <thead>
+                      <tr>
+                        {["Nombre", "Estado", ""].map((h) => (
+                          <th key={h} style={{ textAlign: "left", fontSize: 11, textTransform: "uppercase", color: COLORS.inkSoft, borderBottom: `2px solid ${COLORS.ink}`, padding: "8px 8px" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {refLists[mantSeccion]
+                        .filter((x) => !buscarMant || x.nombre.includes(buscarMant))
+                        .sort((a, b) => a.nombre.localeCompare(b.nombre))
+                        .map((x) => (
+                          <tr key={x.id}>
+                            <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}`, opacity: x.activo === false ? 0.5 : 1 }}>{x.nombre}</td>
+                            <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                              <span style={{
+                                fontSize: 11, padding: "3px 8px", borderRadius: 20, fontWeight: 600,
+                                background: x.activo === false ? "#E5E5E5" : COLORS.paidBg,
+                                color: x.activo === false ? COLORS.inkSoft : COLORS.paid,
+                              }}>
+                                {x.activo === false ? "Inactivo" : "Activo"}
+                              </span>
+                            </td>
+                            <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>
+                              <div style={{ display: "flex", gap: 10 }}>
+                                <button onClick={() => catEditar(mantSeccion, x.id, x.nombre)} title="Editar nombre" style={{ background: "none", border: "none", color: COLORS.teal, cursor: "pointer", fontSize: 13 }}>✎</button>
+                                <button onClick={() => catToggleActivo(mantSeccion, x.id)} title={x.activo === false ? "Activar" : "Desactivar"} style={{ background: "none", border: "none", color: COLORS.gold, cursor: "pointer", fontSize: 12, fontWeight: 700 }}>
+                                  {x.activo === false ? "Activar" : "Desactivar"}
+                                </button>
+                                <button onClick={() => catEliminar(mantSeccion, x.id, x.nombre)} title="Eliminar" style={{ background: "none", border: "none", color: COLORS.due, cursor: "pointer", fontSize: 13 }}>✕</button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                  {refLists[mantSeccion].length === 0 && (
+                    <div style={{ textAlign: "center", color: COLORS.inkSoft, padding: "20px 0", fontSize: 13 }}>Todavía no hay ninguno registrado.</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {toast && (
+          <div style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", background: COLORS.ink, color: "#fff", padding: "9px 16px", borderRadius: 5, fontSize: 13, zIndex: 50 }}>
+            {toast}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen({ onError }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [cargando, setCargando] = useState(false);
+
+  async function iniciarSesion(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    setError("");
+    if (!email.trim() || !password) {
+      setError("Escribe tu correo y contraseña.");
+      return;
+    }
+    setCargando(true);
+    try {
+      await auth.signInWithEmailAndPassword(email.trim(), password);
+    } catch (err) {
+      const codigo = err && err.code;
+      if (codigo === "auth/invalid-credential" || codigo === "auth/wrong-password" || codigo === "auth/user-not-found") {
+        setError("Correo o contraseña incorrectos.");
+      } else if (codigo === "auth/too-many-requests") {
+        setError("Demasiados intentos. Espera unos minutos e intenta de nuevo.");
+      } else {
+        setError("No se pudo iniciar sesión: " + (err && err.message ? err.message : "error desconocido"));
+      }
+    } finally {
+      setCargando(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#EDEAE2", fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif", padding: 16 }}>
+      <form onSubmit={iniciarSesion} style={{ background: "#fff", borderRadius: 8, padding: 28, width: "100%", maxWidth: 340, boxShadow: "0 10px 30px rgba(0,0,0,0.12)" }}>
+        <h1 style={{ fontSize: 18, margin: "0 0 4px", color: "#1F2530" }}>Control de Entregas</h1>
+        <p style={{ fontSize: 12.5, color: "#5B6270", margin: "0 0 18px" }}>Inicia sesión con la cuenta de tu negocio.</p>
+        <label style={{ fontSize: 11, color: "#5B6270", display: "block", marginBottom: 4 }}>Correo</label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          style={{ width: "100%", fontSize: 14, padding: "8px 10px", border: "1px solid #D8D3C4", borderRadius: 4, marginBottom: 12, boxSizing: "border-box" }}
+          autoFocus
+        />
+        <label style={{ fontSize: 11, color: "#5B6270", display: "block", marginBottom: 4 }}>Contraseña</label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          style={{ width: "100%", fontSize: 14, padding: "8px 10px", border: "1px solid #D8D3C4", borderRadius: 4, marginBottom: 14, boxSizing: "border-box" }}
+        />
+        {error && <div style={{ color: "#B23A2E", fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+        <button type="submit" disabled={cargando} style={{ width: "100%", fontFamily: "inherit", fontSize: 14, fontWeight: 700, padding: "10px 16px", border: "none", borderRadius: 4, cursor: cargando ? "default" : "pointer", background: "#C15A2C", color: "#fff", opacity: cargando ? 0.7 : 1 }}>
+          {cargando ? "Entrando..." : "Iniciar sesión"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function Root() {
+  const [user, setUser] = useState(undefined); // undefined = verificando, null = sin sesión
+
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged((u) => setUser(u || null));
+    return () => unsub();
+  }, []);
+
+  if (user === undefined) {
+    return <div style={{ padding: 40, textAlign: "center", color: "#5B6270", background: "#EDEAE2", minHeight: "100vh" }}>Verificando sesión...</div>;
+  }
+  if (!user) {
+    return <LoginScreen />;
+  }
+  return <App usuarioEmail={user.email} onCerrarSesion={() => auth.signOut()} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+
+<script>
+  (function () {
+    var source = document.getElementById("app-source").textContent;
+    var output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+    }).code;
+    var script = document.createElement("script");
+    script.textContent = output;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
+</html>
