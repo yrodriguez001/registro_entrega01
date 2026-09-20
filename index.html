@@ -123,11 +123,26 @@ function nombresActivos(list) {
   return (list || []).filter((x) => x.activo !== false).map((x) => x.nombre);
 }
 
+function dedupePorNombre(list) {
+  const mapa = new Map();
+  (list || []).forEach((x) => {
+    const clave = up(x.nombre);
+    if (!clave) return;
+    const existente = mapa.get(clave);
+    if (!existente) {
+      mapa.set(clave, x);
+    } else if (existente.activo === false && x.activo !== false) {
+      mapa.set(clave, { ...existente, activo: true });
+    }
+  });
+  return Array.from(mapa.values());
+}
+
 function mergeCatList(remoto, local) {
   const remotoList = migrateList(remoto);
   const mapa = new Map(remotoList.map((x) => [x.id, x]));
   (local || []).forEach((x) => { if (!mapa.has(x.id)) mapa.set(x.id, x); });
-  return Array.from(mapa.values());
+  return dedupePorNombre(Array.from(mapa.values()));
 }
 
 function migrateEntry(it) {
@@ -313,11 +328,22 @@ function App({ usuarioEmail, onCerrarSesion }) {
       const res2 = await storageGet(REF_KEY);
       if (res2) {
         const parsed = JSON.parse(res2.value);
-        setRefLists((prev) => ({
-          clientes: mergeCatList(parsed.clientes, prev.clientes),
-          direcciones: mergeCatList(parsed.direcciones, prev.direcciones),
-          choferes: mergeCatList(parsed.choferes && parsed.choferes.length ? parsed.choferes : CHOFER_SUGERIDOS, prev.choferes),
-        }));
+        let merged;
+        setRefLists((prev) => {
+          merged = {
+            clientes: mergeCatList(parsed.clientes, prev.clientes),
+            direcciones: mergeCatList(parsed.direcciones, prev.direcciones),
+            choferes: mergeCatList(parsed.choferes && parsed.choferes.length ? parsed.choferes : CHOFER_SUGERIDOS, prev.choferes),
+          };
+          return merged;
+        });
+        const teniaDuplicados =
+          (parsed.clientes || []).length !== merged.clientes.length ||
+          (parsed.direcciones || []).length !== merged.direcciones.length ||
+          (parsed.choferes || []).length !== merged.choferes.length;
+        if (teniaDuplicados) {
+          persistRefLists(merged);
+        }
       }
     } catch (err) {
       // se queda con los valores actuales
@@ -510,6 +536,11 @@ function App({ usuarioEmail, onCerrarSesion }) {
       onYes: (nuevo) => {
         const nuevoU = up(nuevo).trim();
         if (!nuevoU || nuevoU === nombreActual) return;
+        const yaExiste = refLists[cat].some((x) => x.id !== id && up(x.nombre) === nuevoU);
+        if (yaExiste) {
+          showToast(`Ya existe "${nuevoU}" en la lista. Usa un nombre distinto.`);
+          return;
+        }
         persistRefLists({ ...refLists, [cat]: refLists[cat].map((x) => (x.id === id ? { ...x, nombre: nuevoU } : x)) });
         const campo = cat === "choferes" ? "chofer" : cat === "clientes" ? "cliente" : "direccion";
         const afectadas = (items || []).filter((it) => it[campo] === nombreActual).length;
