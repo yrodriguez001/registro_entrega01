@@ -599,6 +599,14 @@ function App({ usuarioEmail, onCerrarSesion }) {
       const facturaU = up(form.factura.trim());
       const choferEditadoU = up((form.chofer || "").trim());
 
+      if (facturaU) {
+        const facturaDuplicada = (items || []).some((it) => it.factura === facturaU && it.id !== editingId);
+        if (facturaDuplicada) {
+          setFormError(`⚠ El número de factura "${facturaU}" ya está registrado en otra entrega. Usa un número distinto.`);
+          return;
+        }
+      }
+
       if (editingId) {
         setItems((prev) => {
           const next = (prev || []).map((it) =>
@@ -937,8 +945,21 @@ function App({ usuarioEmail, onCerrarSesion }) {
         {/* Navegación de secciones */}
         <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
           <button onClick={() => setVista("entregas")} style={navBtnStyle(vista === "entregas")}>Entregas</button>
-          <button onClick={() => setVista("pendientes")} style={navBtnStyle(vista === "pendientes")}>
-            Pendientes {pendientes.length > 0 ? `(${pendientes.length})` : ""}
+          <button
+            onClick={() => setVista("pendientes")}
+            style={
+              pendientes.length > 0
+                ? {
+                    fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, padding: "8px 16px", borderRadius: 6, cursor: "pointer",
+                    border: `1px solid ${COLORS.due}`,
+                    background: COLORS.due,
+                    color: "#fff",
+                    boxShadow: vista === "pendientes" ? "none" : "0 0 0 2px rgba(178,58,46,0.25)",
+                  }
+                : navBtnStyle(vista === "pendientes")
+            }
+          >
+            {pendientes.length > 0 ? "⚠ " : ""}Pendientes {pendientes.length > 0 ? `(${pendientes.length})` : ""}
           </button>
           <button onClick={abrirMantenimiento} style={navBtnStyle(vista === "mantenimiento")}>🔧 Mantenimiento</button>
         </div>
