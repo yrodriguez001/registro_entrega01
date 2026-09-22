@@ -642,14 +642,10 @@ function App({ usuarioEmail, onCerrarSesion }) {
         return;
       }
 
-      const usados = new Set((items || []).map((x) => x.no));
-      let siguienteNo = 1;
-      while (usados.has(siguienteNo)) siguienteNo++;
-
       const { fecha, hora, ts } = nowParts();
       const entry = {
         id: genId(),
-        no: siguienteNo,
+        no: null,
         fecha, hora, ts,
         cliente: clienteU,
         direccion: direccionU,
@@ -756,20 +752,36 @@ function App({ usuarioEmail, onCerrarSesion }) {
     setConfirmModal({
       message: "Este registro se eliminará permanentemente y su monto se descontará del total.\n\n¿Deseas continuar?",
       onYes: () => {
-        const restantes = (items || []).filter((it) => it.id !== id);
-        const ordenados = [...restantes].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-        const renumerados = restantes.map((it) => ({ ...it, no: ordenados.findIndex((o) => o.id === it.id) + 1 }));
-        persist(renumerados);
+        persist((items || []).filter((it) => it.id !== id));
       },
     });
   }
 
   const choferesActivos = useMemo(() => nombresActivos(refLists.choferes).sort(), [refLists.choferes]);
+
+  // El No. de cada entrega se calcula según el orden real en que se van PROCESANDO
+  // (no el orden en que se registraron), para que la secuencia no salte números
+  // mientras haya entregas todavía pendientes en el medio.
+  const numerosPorId = useMemo(() => {
+    const procesadas = (items || [])
+      .filter((it) => it.estadoProceso !== "pendiente")
+      .sort((a, b) => (a.tsProcesada || 0) - (b.tsProcesada || 0));
+    const mapa = new Map();
+    procesadas.forEach((it, i) => mapa.set(it.id, i + 1));
+    return mapa;
+  }, [items]);
   const clientesActivos = useMemo(() => nombresActivos(refLists.clientes), [refLists.clientes]);
   const direccionesActivas = useMemo(() => nombresActivos(refLists.direcciones), [refLists.direcciones]);
 
+  const PRIORIDAD_ORDEN = { alta: 0, media: 1, baja: 2 };
   const pendientes = useMemo(() => {
-    return (items || []).filter((it) => it.estadoProceso === "pendiente").sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    return (items || [])
+      .filter((it) => it.estadoProceso === "pendiente")
+      .sort((a, b) => {
+        const diff = (PRIORIDAD_ORDEN[a.prioridad] ?? 1) - (PRIORIDAD_ORDEN[b.prioridad] ?? 1);
+        if (diff !== 0) return diff;
+        return (a.ts || 0) - (b.ts || 0);
+      });
   }, [items]);
 
   const montoPendiente = useMemo(() => pendientes.reduce((s, it) => s + (it.monto || 0), 0), [pendientes]);
@@ -780,12 +792,12 @@ function App({ usuarioEmail, onCerrarSesion }) {
     if (q) {
       return base
         .filter((it) => it.cliente.includes(q) || it.factura.includes(q))
-        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        .sort((a, b) => (b.tsProcesada || 0) - (a.tsProcesada || 0));
     }
     if (modoFiltro === "dia") {
       return base
         .filter((it) => it.fecha === fDia)
-        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        .sort((a, b) => (b.tsProcesada || 0) - (a.tsProcesada || 0));
     }
     return base
       .filter((it) => {
@@ -794,7 +806,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
         const okAnio = d.getFullYear() === Number(fAnio);
         return okMes && okAnio;
       })
-      .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      .sort((a, b) => (b.tsProcesada || 0) - (a.tsProcesada || 0));
   }, [items, fMes, fAnio, busqueda, modoFiltro, fDia]);
 
   useEffect(() => {
@@ -852,7 +864,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
     wsReportes["!cols"] = [{ wch: 22 }, { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 15 }];
 
     const rows = filtered.map((it) => ({
-      "No.": it.no, "Fecha": it.fecha, "Cliente": it.cliente, "Direccion": it.direccion,
+      "No.": numerosPorId.get(it.id) || "", "Fecha": it.fecha, "Cliente": it.cliente, "Direccion": it.direccion,
       "Monto": it.monto, "#Factura": it.factura, "Chofer": it.chofer, "Estado pago": it.estado,
       "Estado proceso": ESTADO_PROCESO[it.estadoProceso]?.label || it.estadoProceso,
       "Monto por Cobrar": it.estado === "Factura por Cobrar" ? it.monto : 0,
@@ -1229,7 +1241,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
             )}
             <div style={{ gridColumn: "1 / -1" }}>
               <label style={labelStyle}>Notas / observaciones</label>
-              <input style={inputStyle} value={form.notas} onChange={(e) => setForm({ ...form, notas: e.target.value })} placeholder="Ej: Llamar antes de llegar, entregar en recepción..." />
+              <input style={{ ...inputStyle, textTransform: "uppercase" }} value={form.notas} onChange={(e) => setForm({ ...form, notas: up(e.target.value) })} placeholder="EJ: LLAMAR ANTES DE LLEGAR, ENTREGAR EN RECEPCIÓN..." />
             </div>
             <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <span style={{ color: COLORS.due, fontSize: 12.5, fontWeight: 600 }}>{formError}</span>
@@ -1300,7 +1312,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
                 <tbody>
                   {filteredPagina.map((it) => (
                     <tr key={it.id}>
-                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.no}</td>
+                      <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{numerosPorId.get(it.id)}</td>
                       <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.fecha}</td>
                       <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.cliente}</td>
                       <td style={{ padding: "9px 8px", borderBottom: `1px solid ${COLORS.border}` }}>{it.direccion}</td>
@@ -1401,7 +1413,7 @@ function App({ usuarioEmail, onCerrarSesion }) {
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {pendientes.map((it) => (
-                  <div key={it.id} style={{ border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${PRIORIDADES[it.prioridad]?.text || COLORS.border}`, borderRadius: 6, padding: 12 }}>
+                  <div key={it.id} style={{ border: `1px solid ${COLORS.border}`, borderLeft: `4px solid ${PRIORIDADES[it.prioridad]?.text || COLORS.border}`, background: PRIORIDADES[it.prioridad]?.bg || COLORS.surface, borderRadius: 6, padding: 12 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
                       <div>
                         <div style={{ fontWeight: 700, fontSize: 14 }}>{it.cliente}</div>
@@ -1411,6 +1423,15 @@ function App({ usuarioEmail, onCerrarSesion }) {
                         <span style={{ ...mono, fontSize: 13, fontWeight: 700 }}>{money(it.monto)}</span>
                         <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>#{it.factura || "—"}</span>
                         <span style={{ fontSize: 11.5, color: COLORS.inkSoft }}>{it.fecha} · {it.hora}</span>
+                        <span style={{
+                          fontSize: 10.5, padding: "3px 9px", borderRadius: 20, fontWeight: 800,
+                          textTransform: "uppercase", letterSpacing: 0.4,
+                          background: "#FFFFFF",
+                          border: `1.5px solid ${it.estado === "Factura Pagada" ? COLORS.paid : COLORS.due}`,
+                          color: it.estado === "Factura Pagada" ? COLORS.paid : COLORS.due,
+                        }}>
+                          {it.estado}
+                        </span>
                       </div>
                     </div>
                     {it.notas && (
