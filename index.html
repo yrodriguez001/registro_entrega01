@@ -1137,55 +1137,6 @@ function App({ usuarioEmail, onCerrarSesion }) {
           </div>
         </div>
 
-        {/* Filtros */}
-        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 16, marginBottom: 18 }}>
-          <h2 style={{ fontSize: 13, textTransform: "uppercase", letterSpacing: 0.5, margin: "0 0 12px", color: COLORS.inkSoft, borderBottom: `1px solid ${COLORS.border}`, paddingBottom: 8 }}>Filtrar reporte</h2>
-
-          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-            {[{ v: "mes", label: "Mensual" }, { v: "dia", label: "Por día" }].map((opt) => (
-              <button
-                key={opt.v}
-                onClick={() => setModoFiltro(opt.v)}
-                style={{
-                  fontFamily: "inherit", fontSize: 12.5, fontWeight: 600, padding: "6px 14px", borderRadius: 20, cursor: "pointer",
-                  border: `1px solid ${modoFiltro === opt.v ? COLORS.ink : COLORS.border}`,
-                  background: modoFiltro === opt.v ? COLORS.ink : "transparent",
-                  color: modoFiltro === opt.v ? "#fff" : COLORS.inkSoft,
-                }}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-            {modoFiltro === "mes" ? (
-              <>
-                <div>
-                  <label style={labelStyle}>Mes</label>
-                  <select style={inputStyle} value={fMes} onChange={(e) => setFMes(e.target.value)}>
-                    {meses.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label style={labelStyle}>Año</label>
-                  <select style={inputStyle} value={fAnio} onChange={(e) => setFAnio(e.target.value)}>
-                    {anios.map((a) => <option key={a} value={a}>{a}</option>)}
-                  </select>
-                </div>
-              </>
-            ) : (
-              <div>
-                <label style={labelStyle}>Día</label>
-                <input type="date" style={inputStyle} value={fDia} onChange={(e) => setFDia(e.target.value)} />
-              </div>
-            )}
-            <div style={{ flex: 1 }} />
-            <button onClick={exportExcel} style={{ fontFamily: "inherit", fontSize: 14, fontWeight: 600, padding: "9px 16px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.ink, color: "#fff" }}>
-              ⬇ Descargar reporte Excel
-            </button>
-          </div>
-        </div>
         </>
         )}
 
@@ -1262,6 +1213,43 @@ function App({ usuarioEmail, onCerrarSesion }) {
               ⚠ {saveError}
             </div>
           )}
+        </div>
+
+        {/* Filtros */}
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: COLORS.inkSoft, fontWeight: 700, whiteSpace: "nowrap" }}>Filtrar reporte</span>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[{ v: "mes", label: "Mensual" }, { v: "dia", label: "Por día" }].map((opt) => (
+              <button
+                key={opt.v}
+                onClick={() => setModoFiltro(opt.v)}
+                style={{
+                  fontFamily: "inherit", fontSize: 12, fontWeight: 600, padding: "5px 11px", borderRadius: 20, cursor: "pointer",
+                  border: `1px solid ${modoFiltro === opt.v ? COLORS.ink : COLORS.border}`,
+                  background: modoFiltro === opt.v ? COLORS.ink : "transparent",
+                  color: modoFiltro === opt.v ? "#fff" : COLORS.inkSoft,
+                }}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {modoFiltro === "mes" ? (
+            <>
+              <select style={{ ...inputStyle, width: "auto" }} value={fMes} onChange={(e) => setFMes(e.target.value)}>
+                {meses.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+              </select>
+              <select style={{ ...inputStyle, width: "auto" }} value={fAnio} onChange={(e) => setFAnio(e.target.value)}>
+                {anios.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </>
+          ) : (
+            <input type="date" style={{ ...inputStyle, width: "auto" }} value={fDia} onChange={(e) => setFDia(e.target.value)} />
+          )}
+          <div style={{ flex: 1 }} />
+          <button onClick={exportExcel} style={{ fontFamily: "inherit", fontSize: 13, fontWeight: 600, padding: "8px 14px", border: "none", borderRadius: 4, cursor: "pointer", background: COLORS.ink, color: "#fff", whiteSpace: "nowrap" }}>
+            ⬇ Descargar Excel
+          </button>
         </div>
 
         {/* Tabla */}
